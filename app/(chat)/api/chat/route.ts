@@ -179,148 +179,101 @@ export async function POST(request: Request) {
         ],
       });
     }
+const userText =
+  message?.parts
+    ?.filter((p: any) => p.type === "text")
+    .map((p: any) => p.text)
+    .join(" ") || "";
 
-    const modelConfig = chatModels.find((m) => m.id === chatModel);
-    const modelCapabilities = await getCapabilities();
-    const capabilities = modelCapabilities[chatModel];
-    const isReasoningModel = capabilities?.reasoning === true;
-    const supportsTools = capabilities?.tools === true;
+const webhookUrl = process.env.WEBHOOK_URL;
 
-    const modelMessages = await convertToModelMessages(uiMessages);
+if (!webhookUrl) {
+  throw new Error("WEBHOOK_URL no está configurado");
+}
 
-    const stream = createUIMessageStream({
-      originalMessages: isToolApprovalFlow ? uiMessages : undefined,
-      execute: async ({ writer: dataStream }) => {
-        const result = streamText({
-          model: getLanguageModel(chatModel),
-          system: systemPrompt({ requestHints, supportsTools }),
-          messages: modelMessages,
-          stopWhen: stepCountIs(5),
-          experimental_activeTools:
-            isReasoningModel && !supportsTools
-              ? []
-              : [
-                  "getWeather",
-                  "createDocument",
-                  "editDocument",
-                  "updateDocument",
-                  "requestSuggestions",
-                ],
-          providerOptions: {
-            ...(modelConfig?.gatewayOrder && {
-              gateway: { order: modelConfig.gatewayOrder },
-            }),
-            ...(modelConfig?.reasoningEffort && {
-              openai: { reasoningEffort: modelConfig.reasoningEffort },
-            }),
-          },
-          tools: {
-            getWeather,
-            createDocument: createDocument({
-              session,
-              dataStream,
-              modelId: chatModel,
-            }),
-            editDocument: editDocument({ dataStream, session }),
-            updateDocument: updateDocument({
-              session,
-              dataStream,
-              modelId: chatModel,
-            }),
-            requestSuggestions: requestSuggestions({
-              session,
-              dataStream,
-              modelId: chatModel,
-            }),
-          },
-          experimental_telemetry: {
-            isEnabled: isProductionEnvironment,
-            functionId: "stream-text",
-          },
-        });
+const sessionId = `${session.user.id}_default`;
 
-        dataStream.merge(
-          result.toUIMessageStream({ sendReasoning: isReasoningModel })
-        );
+const webhookResponse = await fetch(webhookUrl, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    message: userText,
+    user_id: session.user.id,
+    user_email: session.user.email ?? "",
+    chat_id: id,
+    session_id: sessionId,
+    agent: "default",
+  }),
+});
 
-        if (titlePromise) {
-          const title = await titlePromise;
-          dataStream.write({ type: "data-chat-title", data: title });
-          updateChatTitleById({ chatId: id, title });
-        }
-      },
-      generateId: generateUUID,
-      onFinish: async ({ messages: finishedMessages }) => {
-        if (isToolApprovalFlow) {
-          for (const finishedMsg of finishedMessages) {
-            const existingMsg = uiMessages.find((m) => m.id === finishedMsg.id);
-            if (existingMsg) {
-              await updateMessage({
-                id: finishedMsg.id,
-                parts: finishedMsg.parts,
-              });
-            } else {
-              await saveMessages({
-                messages: [
-                  {
-                    id: finishedMsg.id,
-                    role: finishedMsg.role,
-                    parts: finishedMsg.parts,
-                    createdAt: new Date(),
-                    attachments: [],
-                    chatId: id,
-                  },
-                ],
-              });
-            }
-          }
-        } else if (finishedMessages.length > 0) {
-          await saveMessages({
-            messages: finishedMessages.map((currentMessage) => ({
-              id: currentMessage.id,
-              role: currentMessage.role,
-              parts: currentMessage.parts,
-              createdAt: new Date(),
-              attachments: [],
-              chatId: id,
-            })),
-          });
-        }
-      },
-      onError: (error) => {
-        if (
-          error instanceof Error &&
-          error.message?.includes(
-            "AI Gateway requires a valid credit card on file to service requests"
-          )
-        ) {
-          return "AI Gateway requires a valid credit card on file to service requests. Please visit https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card to add a card and unlock your free credits.";
-        }
-        return "Oops, an error occurred!";
-      },
+const rawText = await webhookResponse.text();
+
+if (!webhookResponse.ok) {
+  throw new Error(`Error en webhook n8n: ${webhookResponse.status} - ${rawText}`);
+}
+
+let data: any;
+try {
+  data = JSON.parse(rawText);
+} catch {
+  throw new Error(`Respuesta no válida de n8n: ${rawText}`);
+}
+
+const reply =
+  data.reply ||
+  data.response ||
+  data.output ||
+  "Sin respuesta desde agente";
+
+const stream = createUIMessageStream({
+  execute: async ({ writer }) => {
+    const assistantMessageId = generateUUID();
+
+    writer.write({
+      type: "text-start",
+      id: assistantMessageId,
     });
 
-    return createUIMessageStreamResponse({
-      stream,
-      async consumeSseStream({ stream: sseStream }) {
-        if (!process.env.REDIS_URL) {
-          return;
-        }
-        try {
-          const streamContext = getStreamContext();
-          if (streamContext) {
-            const streamId = generateId();
-            await createStreamId({ streamId, chatId: id });
-            await streamContext.createNewResumableStream(
-              streamId,
-              () => sseStream
-            );
-          }
-        } catch (_) {
-          /* non-critical */
-        }
-      },
+    writer.write({
+      type: "text-delta",
+      id: assistantMessageId,
+      delta: reply,
     });
+
+    writer.write({
+      type: "text-end",
+      id: assistantMessageId,
+    });
+
+    await saveMessages({
+      messages: [
+        {
+          id: assistantMessageId,
+          role: "assistant",
+          parts: [{ type: "text", text: reply }],
+          createdAt: new Date(),
+          attachments: [],
+          chatId: id,
+        },
+      ],
+    });
+
+    if (titlePromise) {
+      const title = await titlePromise;
+      writer.write({
+        type: "data-chat-title",
+        data: title,
+      });
+      await updateChatTitleById({ chatId: id, title });
+    }
+  },
+  generateId: generateUUID,
+});
+
+return createUIMessageStreamResponse({ stream });
+    
   } catch (error) {
     const vercelId = request.headers.get("x-vercel-id");
 
