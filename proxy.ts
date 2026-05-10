@@ -23,10 +23,21 @@ export async function proxy(request: NextRequest) {
 
   if (!token) {
     const redirectUrl = encodeURIComponent(new URL(request.url).pathname);
-
     return NextResponse.redirect(
-      new URL(`${base}/api/auth/guest?redirectUrl=${redirectUrl}`, request.url)
+      new URL(`${base}/login?redirectUrl=${redirectUrl}`, request.url)
     );
+  }
+
+  const isGuest = guestRegex.test(token?.email ?? "");
+
+  // Si es guest → forzar registro con email real
+  if (isGuest && !["/login", "/register"].includes(pathname) && !pathname.startsWith("/api")) {
+    return NextResponse.redirect(new URL(`${base}/login`, request.url));
+  }
+
+  if (token && !isGuest && ["/login", "/register"].includes(pathname)) {
+    return NextResponse.redirect(new URL(`${base}/`, request.url));
+  }
   }
 
   const isGuest = guestRegex.test(token?.email ?? "");
