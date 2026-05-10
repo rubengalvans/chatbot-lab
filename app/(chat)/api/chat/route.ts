@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { geolocation, ipAddress } from "@vercel/functions";
 import {
   convertToModelMessages,
@@ -46,6 +47,16 @@ import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
 export const maxDuration = 60;
+
+function getSessionId(email: string): string {
+  return (
+    "maia-" +
+    createHash("sha256")
+      .update("maia-v1-" + email.trim().toLowerCase())
+      .digest("hex")
+      .substring(0, 32)
+  );
+}
 
 function getStreamContext() {
   try {
@@ -180,7 +191,7 @@ if (!webhookUrl) {
   throw new Error("WEBHOOK_URL no está configurado");
 }
 
-const sessionId = `${session.user.id}_default`;
+const sessionId = getSessionId(session.user.email ?? session.user.id);
 
 const webhookResponse = await fetch(webhookUrl, {
   method: "POST",
