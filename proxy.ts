@@ -5,11 +5,13 @@ import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  if (pathname.startsWith("/ping")) {
-    return new Response("pong", { status: 200 });
-  }
-
-  if (pathname.startsWith("/api/auth")) {
+  // Rutas siempre permitidas sin verificación
+  if (
+    pathname.startsWith("/ping") ||
+    pathname.startsWith("/api/auth") ||
+    pathname === "/login" ||
+    pathname === "/register"
+  ) {
     return NextResponse.next();
   }
 
@@ -21,8 +23,9 @@ export async function proxy(request: NextRequest) {
 
   const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
+  // Sin sesión → ir a login
   if (!token) {
-    const redirectUrl = encodeURIComponent(new URL(request.url).pathname);
+    const redirectUrl = encodeURIComponent(pathname);
     return NextResponse.redirect(
       new URL(`${base}/login?redirectUrl=${redirectUrl}`, request.url)
     );
@@ -31,12 +34,8 @@ export async function proxy(request: NextRequest) {
   const isGuest = guestRegex.test(token?.email ?? "");
 
   // Si es guest → forzar registro con email real
-  if (isGuest && !["/login", "/register"].includes(pathname) && !pathname.startsWith("/api")) {
+  if (isGuest && !pathname.startsWith("/api")) {
     return NextResponse.redirect(new URL(`${base}/login`, request.url));
-  }
-
-  if (token && !isGuest && ["/login", "/register"].includes(pathname)) {
-    return NextResponse.redirect(new URL(`${base}/`, request.url));
   }
 
   return NextResponse.next();
